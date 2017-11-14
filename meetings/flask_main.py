@@ -69,6 +69,61 @@ def choose():
     flask.g.calendars = list_calendars(gcal_service)
     return render_template('index.html')
 
+
+@app.route("/find_busy_times")
+def find_busy_times():
+    # Get IDs of selected calendars
+    id_list = flask.request.args.get("idList")
+    id_list_split = id_list.split("+")
+
+    # Retrieve selected datetime from session and split into start and end
+    date_time_split = flask.session["daterange"].split(" - ")
+    date_time_start = date_time_split[0]
+    date_time_end = date_time_split[1]
+    
+    # MUST format according to RFC3339 format for timeMin and timeMax in service object
+    # Format received from: https://github.com/crsmithdev/arrow/issues/180
+    start_arrow = arrow.get(date_time_start, "MM/DD/YYYY hh:mm A")
+    start_format = start_arrow.format("YYYY-MM-DDTHH:mm:ssZZ")
+    end_arrow = arrow.get(date_time_end, "MM/DD/YYYY hh:mm A")
+    end_format = end_arrow.format("YYYY-MM-DDTHH:mm:ssZZ")
+
+    # Use current Calendar service
+    credentials = valid_credentials()
+    service = get_gcal_service(credentials)
+
+    # Iterate through each calendar
+    for cal in id_list_split:
+        # While we still have calendars to iterate through, check for events
+        # in selected range (held in session variable daterange)
+        #   CalendarID: id of a user's calendar
+        #   timeMin: Minimum date to start looking for
+        #   timeMax: Maximum date to start looking for
+        #   pageToken: Used to iterate though elist of events
+        #   singleEvents: Make recurring events only be considered once
+        page_token = None
+        while True:
+            events = service.events().list(
+                calendarId = cal, 
+                timeMin = start_format,
+                timeMax = end_format,
+                pageToken = page_token,
+                singleEvents = False).execute()
+            
+            # Update "Busy Times" div
+            for event in events['items']:
+                flask.flash(event["summary"])
+                print(event["summary"])
+            
+            page_token = events.get("nextPageToken")
+
+            if not page_token:
+                break
+    
+    # Empty response, but JQuery uses response to indicate redirect
+    return flask.jsonify({})
+
+
 ####
 #
 #  Google calendar authorization:
@@ -196,13 +251,14 @@ def setrange():
       request.form.get('daterange')))
     daterange = request.form.get('daterange')
     flask.session['daterange'] = daterange
-    daterange_parts = daterange.split()
+    daterange_parts = daterange.split(" - ")
     flask.session['begin_date'] = interpret_date(daterange_parts[0])
-    flask.session['end_date'] = interpret_date(daterange_parts[2])
+    flask.session['end_date'] = interpret_date(daterange_parts[1])
     app.logger.debug("Setrange parsed {} - {}  dates as {} - {}".format(
       daterange_parts[0], daterange_parts[1], 
       flask.session['begin_date'], flask.session['end_date']))
     return flask.redirect(flask.url_for("choose"))
+
 
 ####
 #
@@ -222,11 +278,11 @@ def init_session_values():
     flask.session["begin_date"] = tomorrow.floor('day').isoformat()
     flask.session["end_date"] = nextweek.ceil('day').isoformat()
     flask.session["daterange"] = "{} - {}".format(
-        tomorrow.format("MM/DD/YYYY"),
-        nextweek.format("MM/DD/YYYY"))
+        tomorrow.format("MM/DD/YYYY hh:mm A"),
+        nextweek.format("MM/DD/YYYY hh:mm A"))
     # Default time span each day, 8 to 5
-    flask.session["begin_time"] = interpret_time("9am")
-    flask.session["end_time"] = interpret_time("5pm")
+    flask.session["begintime"] = interpret_time("9am")
+    flask.session["endtime"] = interpret_time("5pm")
 
 def interpret_time( text ):
     """
@@ -264,7 +320,7 @@ def interpret_date( text ):
     with the local time zone.
     """
     try:
-      as_arrow = arrow.get(text, "MM/DD/YYYY").replace(
+      as_arrow = arrow.get(text, "MM/DD/YYYY hh:mm A").replace(
           tzinfo=tz.tzlocal())
     except:
         flask.flash("Date '{}' didn't fit expected format 12/31/2001")
@@ -297,7 +353,7 @@ def list_calendars(service):
     result = [ ]
     for cal in calendar_list:
         kind = cal["kind"]
-        id = cal["id"]
+        identification = cal["id"]
         if "description" in cal: 
             desc = cal["description"]
         else:
@@ -306,11 +362,10 @@ def list_calendars(service):
         # Optional binary attributes with False as default
         selected = ("selected" in cal) and cal["selected"]
         primary = ("primary" in cal) and cal["primary"]
-        
 
         result.append(
           { "kind": kind,
-            "id": id,
+            "id": identification,
             "summary": summary,
             "selected": selected,
             "primary": primary
